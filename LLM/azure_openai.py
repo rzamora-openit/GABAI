@@ -1,4 +1,4 @@
-"""Azure OpenAI implementation of ChatProvider (Chat Completions REST API, streamed over SSE).
+"""Azure OpenAI (Chat Completions REST API, streamed over SSE).
 
 Settings come from .env:
     AZURE_OPENAI_ENDPOINT     e.g. https://my-resource.openai.azure.com
@@ -19,16 +19,17 @@ from LLM.base import ChatProvider, ContentDelta, StreamEvent, ToolCall
 from Utility.env import env
 
 
-class AzureOpenAIProvider(ChatProvider):
+class AzureOpenAI(ChatProvider):
     supports_thinking = False  # Chat Completions does not stream reasoning text
 
-    def __init__(self, deployment: str | None = None, endpoint: str | None = None, api_key: str | None = None,
-                 api_version: str | None = None, reasoning_effort: str | None = None, timeout: int = 600):
-        self.deployment = deployment or env("AZURE_OPENAI_DEPLOYMENT", required=True)
-        self.endpoint = (endpoint or env("AZURE_OPENAI_ENDPOINT", required=True)).rstrip("/")
-        self.api_key = api_key or env("AZURE_OPENAI_API_KEY", required=True)
-        self.api_version = api_version or env("AZURE_OPENAI_API_VERSION", "2024-10-21")
-        self.reasoning_effort = reasoning_effort or env("AZURE_OPENAI_REASONING_EFFORT")
+    def __init__(self, options: dict | None = None, timeout: int = 600):
+        """options: extra Chat Completions request fields, e.g. {"temperature": 0, "max_tokens": 4000}."""
+        self.options = options or {}
+        self.deployment = env("AZURE_OPENAI_DEPLOYMENT", required=True)
+        self.endpoint = env("AZURE_OPENAI_ENDPOINT", required=True).rstrip("/")
+        self.api_key = env("AZURE_OPENAI_API_KEY", required=True)
+        self.api_version = env("AZURE_OPENAI_API_VERSION", "2024-10-21")
+        self.reasoning_effort = env("AZURE_OPENAI_REASONING_EFFORT")
         self.timeout = timeout
 
     @staticmethod
@@ -53,7 +54,7 @@ class AzureOpenAIProvider(ChatProvider):
     def stream(self, messages: list[dict], tools: list[dict] | None = None) -> Iterator[StreamEvent]:
         url = (f"{self.endpoint}/openai/deployments/{self.deployment}/chat/completions"
                f"?api-version={self.api_version}")
-        payload = {"messages": self._convert(messages), "stream": True}
+        payload = {**self.options, "messages": self._convert(messages), "stream": True}
         if tools:
             payload["tools"] = tools
         if self.reasoning_effort:
