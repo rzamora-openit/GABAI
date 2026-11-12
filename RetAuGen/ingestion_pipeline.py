@@ -17,7 +17,11 @@ def ingest(pdf_folder: str | Path, extracted_folder: str | Path, chunk_folder: s
     - no extracted_folder/{source}.txt     -> extract the PDF
     - no chunk_folder/{source}.chunk_*.md  -> chunk the extracted text (old db rows of that PDF are removed first)
     - chunk files not in the db            -> embed and save those files
+
+    First, the files and db rows of PDFs that are no longer in pdf_folder are removed.
     """
+    remove_deleted_pdfs(pdf_folder, extracted_folder, chunk_folder, db)
+
     for pdf_file in sorted(Path(pdf_folder).glob("*.pdf")):
         source = pdf_file.stem
 
@@ -32,6 +36,28 @@ def ingest(pdf_folder: str | Path, extracted_folder: str | Path, chunk_folder: s
 
         stored = db.filenames(source)
         embed_chunks([file for file in chunk_files if file.name not in stored], embedder, db)
+
+
+def remove_deleted_pdfs(pdf_folder: str | Path, extracted_folder: str | Path, chunk_folder: str | Path,
+                        db: VectorDbContext) -> None:
+    """Delete the extracted text, chunk files and db rows of every source whose PDF is gone from pdf_folder."""
+    sources = {pdf_file.stem for pdf_file in Path(pdf_folder).glob("*.pdf")}
+
+    for file in Path(extracted_folder).glob("*.txt"):
+        if file.stem not in sources:
+            file.unlink()
+
+    for file in Path(chunk_folder).glob("*.chunk_*.md"):
+        if source_of(file.name) not in sources:
+            file.unlink()
+
+    for source in {source_of(filename) for filename in db.filenames()} - sources:
+        db.delete(source)
+
+
+def source_of(chunk_filename: str) -> str:
+    """'Doc.chunk_3.md' -> 'Doc'."""
+    return chunk_filename.rsplit(".chunk_", 1)[0]
 
 
 def extract(pdf_file: Path, out_file: Path) -> None:
