@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from LLM import ChatProvider, OllamaEmbedder, ToolCall
-from RetAuGen.vector_db_context import VectorDbContext
+from Utility.vector_db_context import VectorDbContext
 
 
 def retrieve(intent: str, n: int, chunk_folder: str | Path, embedder: OllamaEmbedder, db: VectorDbContext) -> list[str]:

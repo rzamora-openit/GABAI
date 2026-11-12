@@ -4,7 +4,7 @@ import streamlit as st
 
 from LLM import AzureOpenAI, OllamaEmbedder
 from RetAuGen.ingestion_pipeline import ingest
-from RetAuGen.vector_db_context import VectorDbContext
+from Utility.vector_db_context import VectorDbContext
 
 if st.button("Run ingestion pipeline"):
     with st.spinner("Ingesting..."):
@@ -16,12 +16,6 @@ if st.button("Run ingestion pipeline"):
     st.success("Done.")
 
 st.space()
-st.space()
-st.space()
-st.space()
-st.space()
-
-
 
 
 if st.button("Reset db"):

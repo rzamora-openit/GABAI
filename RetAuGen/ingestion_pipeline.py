@@ -7,7 +7,7 @@ from pathlib import Path
 from langchain_community.document_loaders import PyPDFLoader
 
 from LLM import AzureOpenAI, ChatProvider, OllamaEmbedder, ToolCall
-from RetAuGen.vector_db_context import VectorDbContext
+from Utility.vector_db_context import VectorDbContext
 
 
 def ingest(pdf_folder: str | Path, extracted_folder: str | Path, chunk_folder: str | Path, llm: ChatProvider,

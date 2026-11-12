@@ -5,7 +5,7 @@ import streamlit as st
 
 from LLM import MODELS, AzureOpenAI, ContentDelta, OllamaEmbedder, ThinkingDelta, ToolCall
 from RetAuGen.retrieval_pipeline import rerank_agent, retrieve
-from RetAuGen.vector_db_context import VectorDbContext
+from Utility.vector_db_context import VectorDbContext
 
 TOP_N = 5  # chunks fetched from the vector db before re-ranking
 CHUNK_FOLDER = "KnowledgeBase/chunks"
