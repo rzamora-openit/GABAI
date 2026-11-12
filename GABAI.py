@@ -17,6 +17,31 @@ st.title("Assistant Conversation")
 # Pick the LLM; every provider streams the same Thinking / Content / ToolCall events
 model_name = st.sidebar.selectbox("Model", list(MODELS))
 
+# Workflow state for the current question: the steps the agent must complete, in order.
+WORKFLOW_STEPS = ("Retrieve", "Classify", "Synthesize")
+
+def new_workflow():
+    return {step: False for step in WORKFLOW_STEPS}
+
+def workflow_text():
+    """Serialize the workflow state as text, e.g. 'Retrieve: Done'."""
+    state = st.session_state.workflow
+    return "\n".join(f"{step}: {'Done' if state[step] else 'Not Done'}" for step in WORKFLOW_STEPS)
+
+if "workflow" not in st.session_state:
+    st.session_state.workflow = new_workflow()
+
+def show_workflow():
+    # workflow_placeholder lives in the sidebar; updating it redraws in place
+    state = st.session_state.workflow
+    workflow_placeholder.markdown("\n\n".join(
+        f":green[**☑ {step}**]" if state[step] else f"☐ {step}" for step in WORKFLOW_STEPS
+    ))
+
+def mark_done(step):
+    st.session_state.workflow[step] = True
+    show_workflow()
+
 def process_tool(params, tool_name):
     if tool_name == "search_documents":
         return search_documents(params)
@@ -33,6 +58,7 @@ def search_documents(params):
     finally:
         db.close()
     relevant = rerank_agent(intent, texts, AzureOpenAI(options={"temperature": 0}))
+    mark_done("Retrieve")
     st.caption(f"Relevant chunks found: **{len(relevant)}**")
     if not relevant:
         return "No relevant document or information was found."
@@ -41,6 +67,10 @@ def search_documents(params):
 def classify_question(params):
     classification = str(params.get("classification", "")).strip().lower()
     st.caption(f"Classification: **{classification}**")
+    if not st.session_state.workflow["Retrieve"]:
+        return "Classify is not allowed yet: Retrieve is Not Done. Call search_documents first."
+    if classification in ("answer", "escalate", "dismiss"):
+        mark_done("Classify")
     if classification == "answer":
         return "answer: reply to the student's question using only the retrieved documents."
     if classification == "escalate":
@@ -103,6 +133,9 @@ def system_prompt():
     return f"""
          You are an Academic Advisor. The users are students seeking academic advice.
          Today's date is {today}.
+         Workflow state for the current question (complete the steps in order; a step is Done only
+         after its tool has been called successfully):
+{workflow_text()}
          Answer only from the university's documents (found with search_documents), never from your own
          knowledge. When the documents cannot accommodate an academic question, you stop and escalate it.
          When a question is not about academic matters at all, you dismiss it.
@@ -143,6 +176,11 @@ for msg in st.session_state.messages:
         if msg["content"]:
             st.markdown(msg["content"])
 
+# Workflow state of the current question, shown in the sidebar under the model picker
+st.sidebar.subheader("Workflow")
+workflow_placeholder = st.sidebar.empty()
+show_workflow()
+
 # this is where the user will type their message. st.chat_input() is a built-in Streamlit component that creates a text input and automatically scrolls to the bottom of the page when new messages are added.
 prompt = st.chat_input("Type your message")
 
@@ -157,6 +195,7 @@ def generate(use_tools=True, tool_rounds=0):
     thinking_body = None
     tool_calls: list[ToolCall] = []
 
+    st.session_state.messages[0]["content"] = system_prompt()  # carries the latest workflow state
     try:
         provider = MODELS[model_name]()
         for event in provider.stream(st.session_state.messages, tools if use_tools else None):
@@ -196,15 +235,18 @@ def generate(use_tools=True, tool_rounds=0):
             })
         # Tools stay on until the question is classified (search -> classify), then turn off so the model
         # must write the reply. Capped at 3 tool rounds so a model that never classifies cannot loop forever.
-        classified = any(tc.name == "classify_question" for tc in tool_calls)
+        classified = st.session_state.workflow["Classify"]
         return generate(use_tools=not classified and tool_rounds < 2, tool_rounds=tool_rounds + 1)
     else:
         placeholder.markdown(complete_response)
+        mark_done("Synthesize")
         st.session_state.messages.append({"role": "assistant", "content": complete_response, "thinking": complete_thinking})
         return True
 
 # run this logic every time the user submits a new message
 if prompt:
+    st.session_state.workflow = new_workflow()
+    show_workflow()
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"): st.markdown(prompt)
     if generate():  # on error, skip the redraw so the error message stays visible
