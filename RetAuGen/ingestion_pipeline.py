@@ -12,46 +12,45 @@ from RetAuGen.vector_db_context import VectorDbContext
 
 def ingest(pdf_folder: str | Path, extracted_folder: str | Path, chunk_folder: str | Path, llm: ChatProvider,
            embedder: OllamaEmbedder, db: VectorDbContext) -> None:
-    """Extract every PDF in pdf_folder into extracted_folder, chunk it into chunk_folder, embed the chunks
-    and save them to the db.
+    """Ingest every PDF in pdf_folder, running only the steps whose output is missing:
 
-    A PDF that was ingested before is replaced: its old chunk files and db rows are removed first.
+    - no extracted_folder/{source}.txt     -> extract the PDF
+    - no chunk_folder/{source}.chunk_*.md  -> chunk the extracted text (old db rows of that PDF are removed first)
+    - chunk files not in the db            -> embed and save those files
     """
-    texts = extract(pdf_folder, extracted_folder)
-    for source in texts:
-        for old_chunk in Path(chunk_folder).glob(f"{source}.chunk_*.md"):
-            old_chunk.unlink()
-        db.delete(source)
-    chunk_documents(texts, llm, chunk_folder)
-    embed_chunks(chunk_folder, embedder, db)
+    for pdf_file in sorted(Path(pdf_folder).glob("*.pdf")):
+        source = pdf_file.stem
+
+        extracted_file = Path(extracted_folder) / f"{source}.txt"
+        if not extracted_file.exists():
+            extract(pdf_file, extracted_file)
+
+        chunk_files = sorted(Path(chunk_folder).glob(f"{source}.chunk_*.md"))
+        if not chunk_files:
+            db.delete(source)
+            chunk_files = chunk_document(source, extracted_file.read_text(encoding="utf-8"), llm, chunk_folder)
+
+        stored = db.filenames(source)
+        embed_chunks([file for file in chunk_files if file.name not in stored], embedder, db)
 
 
-def extract(folder: str | Path, out_dir: str | Path) -> dict[str, str]:
-    """Extract the text of every PDF in the folder and save it as out_dir/{filename}.txt.
+def extract(pdf_file: Path, out_file: Path) -> None:
+    """Extract the PDF's text and save it to out_file."""
+    pages = PyPDFLoader(str(pdf_file)).load()
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text("\n\n".join(page.page_content for page in pages), encoding="utf-8")
 
-    Returns {pdf file name without extension: extracted text}.
-    """
+
+def chunk_document(source: str, text: str, llm: ChatProvider, out_dir: str | Path) -> list[Path]:
+    """Run the agent on the text and save each chunk as out_dir/{source}.chunk_{N}.md. Returns the saved files."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    texts = {}
-    for pdf_file in sorted(Path(folder).glob("*.pdf")):
-        pages = PyPDFLoader(str(pdf_file)).load()
-        texts[pdf_file.stem] = "\n\n".join(page.page_content for page in pages)
-        (out_dir / f"{pdf_file.stem}.txt").write_text(texts[pdf_file.stem], encoding="utf-8")
-    return texts
-
-
-def chunk_documents(texts: dict[str, str], llm: ChatProvider, out_dir: str | Path) -> None:
-    """Run the agent on each extracted document and save each chunk as out_dir/{filename}.chunk_{N}.md.
-
-    texts: {filename: extracted text}, as returned by extract().
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for filename, text in texts.items():
-        chunks = chunking_agent(text, llm)
-        for n, chunk in enumerate(chunks, start=1):
-            (out_dir / f"{filename}.chunk_{n}.md").write_text(chunk, encoding="utf-8")
+    files = []
+    for n, chunk in enumerate(chunking_agent(text, llm), start=1):
+        file = out_dir / f"{source}.chunk_{n}.md"
+        file.write_text(chunk, encoding="utf-8")
+        files.append(file)
+    return files
 
 
 def chunking_agent(text: str, llm: ChatProvider) -> list[str]:
@@ -87,9 +86,10 @@ Return all chunks by calling the save_chunks tool once."""
     return []
 
 
-def embed_chunks(folder: str | Path, embedder: OllamaEmbedder, db: VectorDbContext) -> None:
-    """Read every *.chunk_*.md file in the folder, embed its text, and save (filename, vector) to the db."""
-    files = sorted(Path(folder).glob("*.chunk_*.md"))
+def embed_chunks(files: list[Path], embedder: OllamaEmbedder, db: VectorDbContext) -> None:
+    """Embed the text of each chunk file and save (filename, vector) to the db."""
+    if not files:
+        return
     texts = [file.read_text(encoding="utf-8") for file in files]
     vectors = embedder.embed_documents(texts)
     for file, vector in zip(files, vectors):

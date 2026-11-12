@@ -26,6 +26,11 @@ class VectorDbContext:
         """Delete every chunk of a source PDF, i.e. filenames starting with '{source}.' (e.g. 'Doc.chunk_1.md')."""
         self.conn.execute("DELETE FROM chunk_vectors WHERE starts_with(filename, %s)", (f"{source}.",))
 
+    def filenames(self, source: str) -> set[str]:
+        """Stored chunk filenames of a source PDF, i.e. filenames starting with '{source}.'."""
+        rows = self.conn.execute("SELECT filename FROM chunk_vectors WHERE starts_with(filename, %s)", (f"{source}.",))
+        return {row[0] for row in rows.fetchall()}
+
     def delete_all(self) -> None:
         self.conn.execute("DELETE FROM chunk_vectors")
 
