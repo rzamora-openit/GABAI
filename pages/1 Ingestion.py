@@ -15,6 +15,15 @@ if st.button("Run ingestion pipeline"):
             db.close()
     st.success("Done.")
 
+st.space()
+st.space()
+st.space()
+st.space()
+st.space()
+
+
+
+
 if st.button("Reset db"):
     # Deletes the files the pipeline generated (not the PDFs) and every row in the vector table.
     for file in [*Path("KnowledgeBase/extracted").glob("*.txt"), *Path("KnowledgeBase/chunks").glob("*.chunk_*.md")]:

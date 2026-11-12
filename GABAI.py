@@ -1,3 +1,4 @@
+import datetime
 from dataclasses import asdict
 
 import streamlit as st
@@ -58,15 +59,16 @@ tools = [
             "name": "search_documents",
             "description": (
                 "Search the university's documents. Pass the intent behind the student's question: what they "
-                "actually want to know, as a short standalone statement. Returns the relevant document "
-                "sections, or says that no relevant information was found."
+                "actually want to know, as a short standalone statement, "
+                "paraphase the sentence to be optimized for vector embedding semantic similarity search. "
+                "Returns the relevant document sections, or says that no relevant information was found."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "intent": {
                         "type": "string",
-                        "description": "e.g. 'requirements and procedure to apply for a leave of absence'",
+                        "description": "'requirements and procedure to apply for enrollment'",
                     }
                 },
                 "required": ["intent"]
@@ -82,8 +84,7 @@ tools = [
                 "'answer': the retrieved documents contain the information needed. "
                 "'escalate': the question is an academic matter at the university (enrollment, courses, grades, "
                 "programs, applications, student records and the like), but the documents do not cover it. "
-                "'dismiss': the question is outside the scope of an academic advisor altogether, i.e. a different "
-                "subject that a human advisor would not handle either."
+                "'dismiss': there is no evidence that the question is relevant to any academic matter, event and announcement related to the university, or any subject that a human advisor would not handle either."
             ),
             "parameters": {
                 "type": "object",
@@ -97,13 +98,11 @@ tools = [
 ]
 
 
-# We will store the conversation history in Streamlit's session state, which allows us to keep track of messages across user interactions.
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        # Also, initialize the system prompt
-        {"role": "system", "content": 
-         """
+def system_prompt():
+    today = datetime.date.today().strftime("%A, %B %d, %Y")
+    return f"""
          You are an Academic Advisor. The users are students seeking academic advice.
+         Today's date is {today}.
          Answer only from the university's documents (found with search_documents), never from your own
          knowledge. When the documents cannot accommodate an academic question, you stop and escalate it.
          When a question is not about academic matters at all, you dismiss it.
@@ -121,8 +120,15 @@ if "messages" not in st.session_state:
          3. Synthesize: follow the classification result. When answering, use only the retrieved documents,
             be concise, and name the procedure or section you used. Never invent
             requirements, fees, offices or deadlines.
-         """}
-    ]
+         """
+
+
+# We will store the conversation history in Streamlit's session state, which allows us to keep track of messages across user interactions.
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "system", "content": system_prompt()}]
+else:
+    # Refresh the system prompt on every rerun so the date stays current if the app stays open past midnight
+    st.session_state.messages[0]["content"] = system_prompt()
 
 # Iterate through the conversation history
 for msg in st.session_state.messages:
