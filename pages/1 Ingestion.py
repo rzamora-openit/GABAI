@@ -4,6 +4,7 @@ import streamlit as st
 
 from LLM import AzureOpenAI, OllamaEmbedder
 from RetAuGen.ingestion_pipeline import ingest
+from Utility.agent_memory_context import AgentMemoryContext
 from Utility.vector_db_context import VectorDbContext
 
 if st.button("Run ingestion pipeline"):
@@ -28,3 +29,16 @@ if st.button("Reset db"):
     finally:
         db.close()
     st.success("Reset done.")
+
+st.space()
+
+
+if st.button("Clear memory"):
+    # Deletes the agent memory row.
+    memory_db = AgentMemoryContext()
+    try:
+        memory_db.delete()
+    finally:
+        memory_db.close()
+    st.session_state.agent_memory = None  # the chat page keeps a copy for the main agent's prompt (session state is shared across pages)
+    st.success("Memory cleared.")
