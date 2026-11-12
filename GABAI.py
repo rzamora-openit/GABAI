@@ -4,7 +4,9 @@ from dataclasses import asdict
 import streamlit as st
 
 from LLM import MODELS, AzureOpenAI, ContentDelta, OllamaEmbedder, ThinkingDelta, ToolCall
+from RetAuGen.memory_agent import memory_agent
 from RetAuGen.retrieval_pipeline import rerank_agent, retrieve
+from Utility.agent_memory_context import AgentMemoryContext
 from Utility.vector_db_context import VectorDbContext
 
 TOP_N = 5  # chunks fetched from the vector db before re-ranking
@@ -41,6 +43,40 @@ def show_workflow():
 def mark_done(step):
     st.session_state.workflow[step] = True
     show_workflow()
+
+# Agent memory, (last_update, memory) or None. Loaded from the db once per session, and refreshed whenever the
+# memory agent saves; system_prompt() puts it at the tail of the main agent's prompt.
+def load_memory():
+    memory_db = AgentMemoryContext()
+    try:
+        return memory_db.get()
+    finally:
+        memory_db.close()
+
+if "agent_memory" not in st.session_state:
+    try:
+        st.session_state.agent_memory = load_memory()
+    except Exception as e:  # the app must still work without the memory db
+        st.session_state.agent_memory = None
+        st.sidebar.warning(f"Agent memory unavailable: {e}")
+
+def memory_section():
+    memory = st.session_state.agent_memory
+    if not memory:
+        return ""
+    return f"\n         Agent memory (last updated {memory[0]}):\n         {memory[1]}\n"
+
+def observe(user_message, response):
+    """Independent observer: the memory agent decides if this exchange is worth saving to the agent memory."""
+    memory_db = AgentMemoryContext()
+    try:
+        # tool_choice=required makes the model call a tool right away (no free text, no reasoning)
+        saved = memory_agent(user_message, response, memory_db, AzureOpenAI(options={"temperature": 0, "tool_choice": "required"}))
+        if saved:
+            st.session_state.agent_memory = memory_db.get()  # the main agent's prompt picks this up on its next call
+        return saved
+    finally:
+        memory_db.close()
 
 def process_tool(params, tool_name):
     if tool_name == "search_documents":
@@ -153,7 +189,7 @@ def system_prompt():
          3. Synthesize: follow the classification result. When answering, use only the retrieved documents,
             be concise, and name the procedure or section you used. Never invent
             requirements, fees, offices or deadlines.
-         """
+{memory_section()}         """
 
 
 # We will store the conversation history in Streamlit's session state, which allows us to keep track of messages across user interactions.
@@ -243,6 +279,11 @@ def generate(use_tools=True, tool_rounds=0):
         st.session_state.messages.append({"role": "assistant", "content": complete_response, "thinking": complete_thinking})
         return True
 
+# A toast sent right before st.rerun() is lost, so it is queued in session state and shown after the redraw
+if "toast" in st.session_state:
+    message, icon = st.session_state.pop("toast")
+    st.toast(message, icon=icon)
+
 # run this logic every time the user submits a new message
 if prompt:
     st.session_state.workflow = new_workflow()
@@ -250,6 +291,13 @@ if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"): st.markdown(prompt)
     if generate():  # on error, skip the redraw so the error message stays visible
+        final_response = st.session_state.messages[-1]["content"]
+        if final_response:
+            try:
+                if observe(prompt, final_response):
+                    st.session_state.toast = ("Memory updated", "🧠")
+            except Exception as e:  # the observer must never break the chat
+                st.session_state.toast = (f"Memory agent failed: {e}", "⚠️")
         # Redraw the page from the saved history. The live-streamed bubbles (and the classification
         # caption) don't line up with the history layout, so without this, leftovers from this run
         # show up as "ghost" text on the next prompt until the new response finishes.
