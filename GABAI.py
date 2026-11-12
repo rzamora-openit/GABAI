@@ -7,9 +7,11 @@ from LLM import MODELS, AzureOpenAI, ContentDelta, OllamaEmbedder, ThinkingDelta
 from RetAuGen.memory_agent import memory_agent
 from RetAuGen.retrieval_pipeline import rerank_agent, retrieve
 from Utility.agent_memory_context import AgentMemoryContext
+from Utility.approval_context import ApprovalContext
 from Utility.vector_db_context import VectorDbContext
 
 TOP_N = 5  # chunks fetched from the vector db before re-ranking
+MAX_TOOL_ROUNDS = 5  # tool rounds per question (search, classify, then approvals) before the model must reply
 CHUNK_FOLDER = "KnowledgeBase/chunks"
 
 st.set_page_config(page_title="GABAI", layout="wide")
@@ -53,6 +55,10 @@ def load_memory():
     finally:
         memory_db.close()
 
+# Ids of the approval requests made in this conversation; the only ones the student can list, change or delete
+if "approval_ids" not in st.session_state:
+    st.session_state.approval_ids = []
+
 if "agent_memory" not in st.session_state:
     try:
         st.session_state.agent_memory = load_memory()
@@ -83,6 +89,8 @@ def process_tool(params, tool_name):
         return search_documents(params)
     if tool_name == "classify_question":
         return classify_question(params)
+    if tool_name == "manage_approvals":
+        return manage_approvals(params)
     return f"Tool {tool_name} not found."
 
 def search_documents(params):
@@ -105,18 +113,71 @@ def classify_question(params):
     st.caption(f"Classification: **{classification}**")
     if not st.session_state.workflow["Retrieve"]:
         return "Classify is not allowed yet: Retrieve is Not Done. Call search_documents first."
-    if classification in ("answer", "escalate", "dismiss"):
+    if classification in ("answer", "escalate", "approval", "dismiss"):
         mark_done("Classify")
     if classification == "answer":
         return "answer: reply to the student's question using only the retrieved documents."
     if classification == "escalate":
-        return ("escalate: do NOT answer the question. Tell the student it is outside the documents "
-                "and has been escalated to a human advisor.")
+        return ("escalate: do NOT answer the question. First call manage_approvals with action 'create' and a request "
+                "that summarizes the student's question and what the human advisor needs to decide. Then tell the "
+                "student it is outside the documents and has been escalated to a human advisor. Say it was "
+                "escalated only if manage_approvals confirmed the request was created.")
+    if classification == "approval":
+        return ("approval: the student wants to see, change or cancel an approval request made earlier. Call "
+                "manage_approvals with action 'list' to find the request, then 'update' (with the new request text) "
+                "or 'delete'. Only pending requests can be changed. Then tell the student the outcome.")
     if classification == "dismiss":
         return ("dismiss: do NOT answer the question and do NOT escalate it. Politely tell the student that you "
                 "can only help with academic matters at the university.")
     return (f"Invalid classification '{classification}'. "
-            "Call classify_question again with 'answer', 'escalate' or 'dismiss'.")
+            "Call classify_question again with 'answer', 'escalate', 'approval' or 'dismiss'.")
+
+def approval_status(a):
+    return "approved" if a.approved else "rejected" if a.rejected else "pending"
+
+def manage_approvals(params):
+    """Create, list, update or delete approval requests. A student only sees and changes requests made in this
+    conversation (there are no student accounts yet), and only while they are still pending."""
+    action = str(params.get("action", "")).strip().lower()
+    request = str(params.get("request", "")).strip()
+    st.caption(f"Approvals: **{action}**")
+    mine = st.session_state.approval_ids
+    try:
+        db = ApprovalContext()
+        try:
+            if action == "create":
+                if not request:
+                    return "A request text is required. Call manage_approvals again with 'request'."
+                mine.append(db.create(request))
+                return f"Approval request #{mine[-1]} was created. A human will review it."
+            records = {a.id: a for a in db.getall() if a.id in mine}
+            if action == "list":
+                if not records:
+                    return "No approval requests were made in this conversation."
+                return "\n".join(f"#{a.id} ({a.date_requested}, {approval_status(a)}): {a.request}" for a in records.values())
+            if action in ("update", "delete"):
+                try:
+                    id = int(params.get("id"))
+                except (TypeError, ValueError):
+                    return "An integer 'id' is required. Call manage_approvals with action 'list' to find it."
+                a = records.get(id)
+                if a is None:
+                    return f"There is no approval request #{id} in this conversation. Call action 'list' to see them."
+                if a.approved or a.rejected:
+                    return f"Approval request #{id} is already {approval_status(a)} and can no longer be changed."
+                if action == "delete":
+                    db.delete(id)
+                    mine.remove(id)
+                    return f"Approval request #{id} was deleted."
+                if not request:
+                    return "A request text is required to update. Call manage_approvals again with 'request'."
+                db.update(id, request=request)
+                return f"Approval request #{id} was updated."
+            return f"Invalid action '{action}'. Use 'create', 'list', 'update' or 'delete'."
+        finally:
+            db.close()
+    except Exception as e:  # a db problem must not crash the chat
+        return f"Approval requests are unavailable right now: {e}"
 
 tools = [
     {
@@ -150,14 +211,42 @@ tools = [
                 "'answer': the retrieved documents contain the information needed. "
                 "'escalate': the question is an academic matter at the university (enrollment, courses, grades, "
                 "programs, applications, student records and the like), but the documents do not cover it. "
+                "'approval': the student asks to see, change or cancel an approval request they made earlier. "
                 "'dismiss': there is no evidence that the question is relevant to any academic matter, event and announcement related to the university, or any subject that a human advisor would not handle either."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "classification": {"type": "string", "enum": ["answer", "escalate", "dismiss"]}
+                    "classification": {"type": "string", "enum": ["answer", "escalate", "approval", "dismiss"]}
                 },
                 "required": ["classification"]
+            }
+        }
+    }
+]
+
+# Offered only after the question is classified, so approvals never skip the retrieve / classify steps
+approval_tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_approvals",
+            "description": (
+                "Manage approval requests that a human advisor will review. "
+                "'create': send a new request (needs 'request'); do this when a question is escalated. "
+                "'list': show the requests made in this conversation with their ids and status. "
+                "'update': change the text of a pending request (needs 'id' and 'request'). "
+                "'delete': cancel a pending request (needs 'id'). "
+                "Requests that are already approved or rejected cannot be changed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["create", "list", "update", "delete"]},
+                    "id": {"type": "integer", "description": "The request id, for update and delete."},
+                    "request": {"type": "string", "description": "What the human advisor is asked to review or approve, as a short standalone statement."},
+                },
+                "required": ["action"]
             }
         }
     }
@@ -183,12 +272,16 @@ def system_prompt():
          2. Classify: after reading the search result, call classify_question with one of:
             - answer: the retrieved documents contain the information needed.
             - escalate: an academic matter at the university that the documents do not cover;
-              a human advisor should handle it.
+              a human advisor should handle it; this sends an approval request to the advisor.
+            - approval: the student asks to see, change or cancel an approval request made earlier.
             - dismiss: outside academic advising altogether (e.g. shopping, weather, coding help,
               general trivia); not something to escalate.
          3. Synthesize: follow the classification result. When answering, use only the retrieved documents,
             be concise, and name the procedure or section you used. Never invent
             requirements, fees, offices or deadlines.
+         Approval requests (manage_approvals, available once the question is classified): create one when you
+         escalate; list, update or delete earlier ones only when the student asks. Never say a request was
+         created, changed or deleted unless manage_approvals confirmed it.
 {memory_section()}         """
 
 
@@ -234,7 +327,7 @@ def generate(use_tools=True, tool_rounds=0):
     st.session_state.messages[0]["content"] = system_prompt()  # carries the latest workflow state
     try:
         provider = MODELS[model_name]()
-        for event in provider.stream(st.session_state.messages, tools if use_tools else None):
+        for event in provider.stream(st.session_state.messages, (approval_tools if st.session_state.workflow["Classify"] else tools) if use_tools else None):
             if isinstance(event, ThinkingDelta):
                 if thinking_body is None:
                     # first thinking chunk: open the "Thinking" expander and stream into it
@@ -269,10 +362,10 @@ def generate(use_tools=True, tool_rounds=0):
                 "tool_call_id": tc.id,
                 "content": process_tool(tc.arguments, tc.name),
             })
-        # Tools stay on until the question is classified (search -> classify), then turn off so the model
-        # must write the reply. Capped at 3 tool rounds so a model that never classifies cannot loop forever.
-        classified = st.session_state.workflow["Classify"]
-        return generate(use_tools=not classified and tool_rounds < 2, tool_rounds=tool_rounds + 1)
+        # Before classifying the model gets the search / classify tools; once classified it gets only manage_approvals
+        # (create / list / update / delete) and may reply any time instead of calling it. Capped so a model that
+        # keeps calling tools cannot loop forever.
+        return generate(use_tools=tool_rounds + 1 < MAX_TOOL_ROUNDS, tool_rounds=tool_rounds + 1)
     else:
         placeholder.markdown(complete_response)
         mark_done("Synthesize")
