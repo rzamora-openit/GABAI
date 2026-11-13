@@ -1,0 +1,34 @@
+﻿"Question","Expected Behavior","Agent Classify","Agent Response","Is Classify Expected","Is Response Expected","Note","Retrieved Chunks"
+"I went on AWOL last term and I also have an 'EXT' grade from two terms ago that hasn't reached the one-year mark yet. Can I apply to complete my EXT grade right now, or do I need to do something else first?","answer","answer","You need to **apply for readmission first** because you went on AWOL. To apply for EXT completion, you must be currently enrolled or on residency in the term of application.
+
+Under the **Application for Readmission** procedure, apply through the Student Portal, upload the required documents and proof of the ₱225 payment, and wait for approval before proceeding with enrollment.
+
+Once you meet the enrollment or residency requirement, you can apply for EXT completion through the Student Portal, provided the one-year period has not lapsed and the application window is open. Contact your faculty-in-charge before submitting the lacking requirements. The approved completion application is valid only for the term in which it is filed.
+
+Sources: [Application for Readmission](https://registrar.upou.edu.ph/application-for-readmission/) and [Application for Completion of EXT](https://registrar.upou.edu.ph/application-for-completion-of-ext/).","TRUE","","Tools called: search_documents, classify_question.","UPOU Academic Procedures.chunk_5.md,UPOU Academic Procedures.chunk_13.md"
+"I am currently an Associate in Arts (AA) student at UPOU with 24 units and a GWA of 2.0. Can I apply to shift to the Bachelor of Arts in Multimedia Studies (BAMS) program?","answer","answer","No. Under UPOU’s [Application for Shifting of Program (Undergraduate)](https://registrar.upou.edu.ph/application-for-shifting-of-program/) policy, AA students cannot shift directly to a bachelor’s program. You must first finish the AA, then apply for admission to BAMS.
+
+Your 24 units and 2.0 GWA do not override that requirement.","TRUE","","Tools called: search_documents, classify_question.","UPOU Academic Procedures.chunk_14.md"
+"I want to drop two 3-unit courses before the dropping deadline. Where do I file this, how much will it cost me in total, and what happens if I file it after mid-term?","answer","answer","File your application through the **Student Portal (AIMS)** and upload your proof of payment. The fee is ₱10 per unit, so two 3-unit courses cost **₱60 total**.
+
+You need the consent of your instructor and Faculty Dean. If you drop a course after mid-term, the faculty member will indicate whether you were **Passing or Failing** at that time, for administrative guidance only.
+
+Source: [Application for Dropping of Courses](https://registrar.upou.edu.ph/application-for-dropping/).","TRUE","","Tools called: search_documents, classify_question.","UPOU Academic Procedures.chunk_7.md,UPOU Academic Procedures.chunk_2.md"
+"I am an FMDS student who wants to permanently withdraw from UPOU and get an Honorable Dismissal. Walk me through the exact order of clearances and applications I need to submit, including any required documents.","answer","answer","For an FMDS student, the order is **Faculty Clearance → University Clearance → Honorable Dismissal request**.
+
+1. **Apply for Faculty of Study Clearance.** Download the FMDS Faculty of Study Clearance Form, complete it, and email it to FMDS. Wait until the clearance is granted before applying for University Clearance.  
+   [Faculty Clearance procedure](https://registrar.upou.edu.ph/procedure-for-application-for-faculty-clearance/)
+
+2. **Apply for University Clearance** through the AIMS Student Portal. Select **“Honorable Dismissal”** as the reason and attach:
+   - A signed letter to the University Registrar stating your reason or reasons for withdrawing.
+   - A valid government-issued ID.
+
+   The relevant offices will review your application, and the Office of the University Registrar gives final approval once all have cleared you. Wait for the approval email, then download and print the approved clearance form and certificate from the portal. Processing takes **21 working days**, or longer if you have deficiencies to settle.
+
+   If a valid, complete Official Transcript of Records from your previous school is not on file, your clearance will be held until you submit the original to the OUR Records Section.  
+   [University Clearance procedure](https://registrar.upou.edu.ph/application-for-university-clearance/)
+
+3. **Request Honorable Dismissal** once University Clearance is approved. Submit the request and track its status in AIMS.  
+   [Honorable Dismissal procedure](https://registrar.upou.edu.ph/application-for-honorable-dismissal/)
+
+Honorable Dismissal is granted to a student who voluntarily withdraws while in good standing in character and conduct, and it certifies that the student has no pending university accountabilities. If granted, you cannot re-enroll in your previous program, though you may apply to another UPOU program through OAS.","TRUE","","Tools called: search_documents, classify_question.","UPOU Academic Procedures.chunk_17.md,UPOU Academic Procedures.chunk_18.md,UPOU Academic Procedures.chunk_9.md"

@@ -21,6 +21,7 @@ from Utility.env import env
 
 class AzureOpenAI(ChatProvider):
     supports_thinking = False  # Chat Completions does not stream reasoning text
+    _rejects_temperature: set[str] = set()  # deployments that answered "temperature not supported": it is left out from then on
 
     def __init__(self, options: dict | None = None, timeout: int = 600):
         """options: extra Chat Completions request fields, e.g. {"temperature": 0, "max_tokens": 4000}."""
@@ -54,7 +55,8 @@ class AzureOpenAI(ChatProvider):
     def stream(self, messages: list[dict], tools: list[dict] | None = None) -> Iterator[StreamEvent]:
         url = (f"{self.endpoint}/openai/deployments/{self.deployment}/chat/completions"
                f"?api-version={self.api_version}")
-        payload = {**self.options, "messages": self._convert(messages), "stream": True}
+        options = {k: v for k, v in self.options.items() if not (k == "temperature" and self.deployment in self._rejects_temperature)}
+        payload = {**options, "messages": self._convert(messages), "stream": True}
         if tools:
             payload["tools"] = tools
         if self.reasoning_effort:
@@ -62,8 +64,14 @@ class AzureOpenAI(ChatProvider):
             payload["reasoning_effort"] = "none" if tools else self.reasoning_effort
 
         pending: dict[int, dict] = {}  # tool calls arrive in pieces, keyed by index
-        with requests.post(url, json=payload, headers={"api-key": self.api_key}, stream=True,
-                           timeout=self.timeout) as response:
+        response = requests.post(url, json=payload, headers={"api-key": self.api_key}, stream=True, timeout=self.timeout)
+        if response.status_code == 400 and "temperature" in payload and "temperature" in response.text:
+            # reasoning deployments only accept the default temperature: retry once without it, and remember that
+            response.close()
+            self._rejects_temperature.add(self.deployment)
+            del payload["temperature"]
+            response = requests.post(url, json=payload, headers={"api-key": self.api_key}, stream=True, timeout=self.timeout)
+        with response:
             if response.status_code >= 400:
                 raise RuntimeError(f"Azure OpenAI {response.status_code}: {response.text}")
             for raw in response.iter_lines():

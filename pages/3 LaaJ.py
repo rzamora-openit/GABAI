@@ -32,15 +32,16 @@ def load_pairs(file):
     with open(file, encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         columns = {name.strip().lower(): name for name in reader.fieldnames or []}
-        if not {"question", "answer"} <= columns.keys():
+        answer_column = columns.get("answer") or columns.get("agent response")  # "agent response" is the Test Runner's column name
+        if "question" not in columns or not answer_column:
             raise ValueError(f"{file.name} needs the columns question,answer (found: {', '.join(reader.fieldnames or []) or 'none'})")
-        chunks_column = columns.get("chunks")
+        chunks_column = columns.get("chunks") or columns.get("retrieved chunks")
         pairs = []
         for row in reader:
             files = None
             if chunks_column:
                 files = [name.strip() for name in (row.get(chunks_column) or "").split(",") if name.strip()]
-            pairs.append({"question": (row[columns["question"]] or "").strip(), "answer": (row[columns["answer"]] or "").strip(), "files": files})
+            pairs.append({"question": (row[columns["question"]] or "").strip(), "answer": (row[answer_column] or "").strip(), "files": files})
         return pairs
 
 

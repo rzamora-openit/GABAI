@@ -6,11 +6,16 @@ from LLM import ChatProvider, OllamaEmbedder, ToolCall
 from Utility.vector_db_context import VectorDbContext
 
 
-def retrieve(intent: str, n: int, chunk_folder: str | Path, embedder: OllamaEmbedder, db: VectorDbContext) -> list[str]:
-    """Return the texts of the n chunks closest to the intent (the intention behind the user's query), closest first."""
+def retrieve_chunks(intent: str, n: int, chunk_folder: str | Path, embedder: OllamaEmbedder, db: VectorDbContext) -> list[tuple[str, str]]:
+    """Return (file name, text) of the n chunks closest to the intent (the intention behind the user's query), closest first."""
     vector = embedder.embed_query(intent)
     filenames = db.top_n(vector, n)
-    return [(Path(chunk_folder) / filename).read_text(encoding="utf-8") for filename in filenames]
+    return [(filename, (Path(chunk_folder) / filename).read_text(encoding="utf-8")) for filename in filenames]
+
+
+def retrieve(intent: str, n: int, chunk_folder: str | Path, embedder: OllamaEmbedder, db: VectorDbContext) -> list[str]:
+    """Return the texts of the n chunks closest to the intent (the intention behind the user's query), closest first."""
+    return [text for _, text in retrieve_chunks(intent, n, chunk_folder, embedder, db)]
 
 
 def rerank_agent(intent: str, texts: list[str], llm: ChatProvider) -> list[str]:
