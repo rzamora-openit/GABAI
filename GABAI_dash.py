@@ -13,14 +13,17 @@ Run from the project root:   python GABAI_dash.py      then open http://127.0.0.
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field
 
 from dash import Dash, Input, Output, State, dcc, html, no_update
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
-from LLM import MODELS, AzureOpenAI, ContentDelta, ThinkingDelta, ToolCall
-from RetAuGen.advisor import MAX_TOOL_ROUNDS, WORKFLOW_STEPS, Advisor
+from LLM import MODELS, azure_openai
+from RetAuGen.advisor import WORKFLOW_STEPS, advisor_context, build_advisor, last_reply, new_workflow
 from RetAuGen.memory_agent import memory_agent
 from Utility.agent_memory_context import AgentMemoryContext
+from Utility.chat_ui import STREAM_MODES, thinking_of
 
 POLL_MS = 300  # how often the page redraws while the advisor is working
 SESSION_IDLE_SECONDS = 6 * 3600  # conversations unused this long are dropped from server memory
@@ -35,6 +38,7 @@ class Bubble:
     content: str = ""
     done: bool = False
     error: str = ""
+    calls: dict = field(default_factory=dict)  # tool names the model called, by index
 
 
 def load_memory():
@@ -53,9 +57,10 @@ class Session:
         # The items of the turn in progress, in order: Bubble (a model call) or str (a tool's progress line).
         # Cleared when the turn succeeds, so the page draws the saved history instead (GABAI.py's st.rerun()).
         self.live = []
-        # The advisor agent (prompt, tools and the workflow state of the current question). Kept per conversation,
-        # so the approval requests of this conversation are remembered. Its tools report progress as captions.
-        self.advisor = Advisor(notify=self.live_caption)
+        # The advisor agent is a LangGraph graph (RetAuGen/advisor.py). Its checkpointer keeps this conversation
+        # (messages, workflow state, approval requests) under one thread id.
+        self.advisor = build_advisor(checkpointer=InMemorySaver())
+        self.config = {"configurable": {"thread_id": str(uuid.uuid4())}}
         # Agent memory, (last_update, memory) or None. Loaded from the db once per conversation, and refreshed whenever
         # the memory agent saves; the advisor puts it at the tail of the main agent's prompt.
         self.memory_warning = ""
@@ -64,10 +69,8 @@ class Session:
         except Exception as e:  # the app must still work without the memory db
             self.agent_memory = None
             self.memory_warning = f"Agent memory unavailable: {e}"
-        self.messages = [{"role": "system", "content": self.advisor.system_prompt(self.agent_memory)}]
-
-    def live_caption(self, text):
-        self.live.append(text)
+        self.history = []  # the saved conversation (LangChain messages), drawn when no turn is in progress
+        self.workflow = new_workflow()  # steps done for the current question, from the graph state
 
 
 sessions: dict[str, Session] = {}
@@ -86,61 +89,46 @@ def get_session(session_id) -> Session:
         return session
 
 
-# ---- the agent loop (GABAI.py's generate and observe, without the drawing) ----
+# ---- the agent loop (GABAI.py's run, without the drawing) ----
 
-def generate(s: Session, model_name, use_tools=True, tool_rounds=0):
-    """Stream one model call into a new live bubble; run its tool calls and call the model again until it replies in
-    text. Returns False if the model call failed (the error is shown in the bubble)."""
-    bubble = Bubble()
-    s.live.append(bubble)
-    tool_calls: list[ToolCall] = []
-
-    s.messages[0]["content"] = s.advisor.system_prompt(s.agent_memory)  # carries the latest workflow state
+def stream_into(s: Session, events):
+    """Draw a LangGraph stream made with stream_mode=STREAM_MODES into s.live, like chat_ui.render_stream does for
+    Streamlit, and return the last graph state. The model tokens of the "agent" node become bubbles; progress lines
+    written by the tools become captions; the full state after each step updates the workflow steps."""
+    bubble, bubble_id, state = None, None, {}
     try:
-        provider = MODELS[model_name]()
-        for event in provider.stream(s.messages, s.advisor.available_tools() if use_tools else None):
-            if isinstance(event, ThinkingDelta):
-                bubble.thinking += event.text
-            elif isinstance(event, ContentDelta):
-                bubble.content += event.text
-            elif isinstance(event, ToolCall):
-                tool_calls.append(event)
-    except Exception as e:
-        bubble.error = f"{model_name}: {e}"
-        bubble.done = True
-        return False
-    bubble.done = True
-
-    if tool_calls:
-        # Record the model's tool calls, then each tool's result, so any provider can continue the conversation
-        s.messages.append({
-            "role": "assistant",
-            "content": bubble.content,
-            "thinking": bubble.thinking,
-            "tool_calls": [asdict(tc) for tc in tool_calls],
-        })
-        for tc in tool_calls:
-            s.messages.append({
-                "role": "tool",
-                "name": tc.name,
-                "tool_call_id": tc.id,
-                "content": s.advisor.process_tool(tc.arguments, tc.name),
-            })
-        # Before classifying the model gets the search / classify tools; once classified it gets only manage_approvals
-        # (create / list / update / delete) and may reply any time instead of calling it. Capped so a model that
-        # keeps calling tools cannot loop forever.
-        return generate(s, model_name, use_tools=tool_rounds + 1 < MAX_TOOL_ROUNDS, tool_rounds=tool_rounds + 1)
-    s.advisor.mark_done("Synthesize")
-    s.messages.append({"role": "assistant", "content": bubble.content, "thinking": bubble.thinking})
-    return True
+        for mode, data in events:
+            if mode == "messages":
+                chunk, metadata = data
+                if metadata.get("langgraph_node") != "agent" or not isinstance(chunk, AIMessageChunk):
+                    continue
+                if bubble is None or chunk.id != bubble_id:
+                    if bubble:
+                        bubble.done = True
+                    bubble, bubble_id = Bubble(), chunk.id
+                    s.live.append(bubble)
+                bubble.thinking += thinking_of(chunk)
+                bubble.content += chunk.text
+                for call in chunk.tool_call_chunks:
+                    if call.get("name"):
+                        bubble.calls[call.get("index", len(bubble.calls))] = call["name"]
+            elif mode == "custom":
+                if isinstance(data, dict) and "progress" in data:
+                    s.live.append(data["progress"])
+            elif mode == "values":
+                state = data
+                s.workflow = data.get("workflow", {})
+    finally:
+        if bubble:
+            bubble.done = True
+    return state
 
 
 def observe(s: Session, user_message, response):
     """Independent observer: the memory agent decides if this exchange is worth saving to the agent memory."""
     memory_db = AgentMemoryContext()
     try:
-        # tool_choice=required makes the model call a tool right away (no free text, no reasoning)
-        saved = memory_agent(user_message, response, memory_db, AzureOpenAI(options={"temperature": 0, "tool_choice": "required"}))
+        saved = memory_agent(user_message, response, memory_db, azure_openai(temperature=0))
         if saved:
             s.agent_memory = memory_db.get()  # the main agent's prompt picks this up on its next call
         return saved
@@ -151,17 +139,22 @@ def observe(s: Session, user_message, response):
 def run_turn(s: Session, prompt, model_name, create_memory):
     """One student question, run in a background thread."""
     try:
-        if generate(s, model_name):  # on error, keep the live bubbles so the error message stays visible
-            final_response = s.messages[-1]["content"]
+        try:
+            context = advisor_context(MODELS[model_name](), memory=s.agent_memory)
+            events = s.advisor.stream({"messages": [HumanMessage(prompt)]}, s.config, context=context, stream_mode=STREAM_MODES)
+            final = stream_into(s, events)
+        except Exception as e:  # keep the live bubbles so the error message stays visible
+            s.live.append(Bubble(error=f"{model_name}: {e}", done=True))
+        else:
+            final_response = last_reply(final)
             if final_response and create_memory:
                 try:
                     if observe(s, prompt, final_response):
-                        s.toast = ("Memory updated", "🧠")
+                        s.toast = ("Memory updated", "\U0001F9E0")
                 except Exception as e:  # the observer must never break the chat
-                    s.toast = (f"Memory agent failed: {e}", "⚠️")
+                    s.toast = (f"Memory agent failed: {e}", "\u26A0\uFE0F")
+            s.history = list(final.get("messages", []))
             s.live.clear()  # draw the saved history from now on
-    except Exception as e:  # e.g. a tool failed (the vector db is down): show it instead of losing the thread silently
-        s.live.append(Bubble(error=f"{type(e).__name__}: {e}", done=True))
     finally:
         s.running = False
 
@@ -182,19 +175,20 @@ def thinking_box(text, is_open):
 
 
 def history_items(messages):
-    """The saved conversation (system prompt and tool results are sent to the model but not shown)."""
+    """The saved conversation (tool results and the system prompt are sent to the model but not shown)."""
     items = []
     for msg in messages:
-        if msg["role"] in ("system", "tool"):
-            continue
-        body = []
-        if msg.get("thinking"):
-            body.append(thinking_box(msg["thinking"], False))
-        for tc in msg.get("tool_calls", []):
-            body.append(caption(f"Tool call: `{tc['name']}({tc['arguments']})`"))
-        if msg["content"]:
-            body.append(dcc.Markdown(msg["content"]))
-        items.append(chat_message(msg["role"], body))
+        if isinstance(msg, HumanMessage):
+            items.append(chat_message("user", [dcc.Markdown(msg.text)]))
+        elif isinstance(msg, AIMessage):
+            body = []
+            if thinking_of(msg):
+                body.append(thinking_box(thinking_of(msg), False))
+            for call in msg.tool_calls:
+                body.append(caption(f"Tool call: `{call['name']}({call['args']})`"))
+            if msg.text:
+                body.append(dcc.Markdown(msg.text))
+            items.append(chat_message("assistant", body))
     return items
 
 
@@ -211,6 +205,8 @@ def live_items(live):
             body.append(thinking_box(item.thinking + ("" if item.done else "▌"), not item.done))
         if item.content or not item.done:
             body.append(dcc.Markdown(item.content + ("" if item.done else "▌")))
+        for name in item.calls.values():
+            body.append(caption(f"Tool call: `{name}`"))
         if item.error:
             body.append(html.Div(item.error, className="error"))
         items.append(chat_message("assistant", body))
@@ -218,7 +214,7 @@ def live_items(live):
 
 
 def workflow_items(workflow):
-    return [html.Div(f"☑ {step}", className="step done") if workflow[step] else html.Div(f"☐ {step}", className="step")
+    return [html.Div(f"☑ {step}", className="step done") if workflow.get(step) else html.Div(f"☐ {step}", className="step")
             for step in WORKFLOW_STEPS]
 
 
@@ -267,7 +263,7 @@ def layout():
         dcc.Interval(id="poll", interval=POLL_MS, disabled=True),
         html.Div([
             html.Label("Model", className="title"),
-            # Pick the LLM; every provider streams the same Thinking / Content / ToolCall events
+            # Pick the LLM; every model is a LangChain chat model, so the advisor graph runs with any of them
             dcc.Dropdown(id="model", options=list(MODELS), value=list(MODELS)[0], clearable=False),
             # Switch for the memory agent: when off, no memory is created or changed (stored memory is still given to the main agent)
             dcc.Checklist(id="create-memory", options=[{"label": " Create memory", "value": "on"}], value=["on"], className="switch"),
@@ -310,8 +306,8 @@ def submit(_clicks, _submits, prompt, model_name, create_memory, session_id):
         return no_update, no_update
     s.running = True
     s.live.clear()  # drop a previous error
-    s.advisor.start_question()
-    s.messages.append({"role": "user", "content": prompt})
+    s.workflow = new_workflow()
+    s.history.append(HumanMessage(prompt))  # shown at once; the graph saves it with the rest when the turn is done
     threading.Thread(target=run_turn, args=(s, prompt, model_name, bool(create_memory)), daemon=True).start()
     return "", False
 
@@ -331,14 +327,14 @@ def render(_ticks, session_id):
     """Draw the conversation; while the advisor is working, redraw every POLL_MS with what it has streamed so far."""
     s = get_session(session_id)
     running = s.running  # read once, before drawing, so the last redraw happens after the turn has finished
-    chat = history_items(list(s.messages)) + live_items(s.live)
+    chat = history_items(list(s.history)) + live_items(s.live)
     warning = html.Div(s.memory_warning, className="warning") if s.memory_warning else None
     toast = no_update
     if s.toast and not running:
         message, icon = s.toast
         s.toast = None
         toast = html.Div(f"{icon} {message}", className="toast", key=str(uuid.uuid4()))  # a new key replays the fade
-    return chat, workflow_items(s.advisor.workflow), warning, toast, not running, running, running
+    return chat, workflow_items(s.workflow), warning, toast, not running, running, running
 
 
 # keep the newest message in view, like st.chat_input
