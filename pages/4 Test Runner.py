@@ -1,12 +1,15 @@
 import csv
-from dataclasses import asdict
+import uuid
 from pathlib import Path
 
 import streamlit as st
+from langchain_core.messages import HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
-from LLM import MODELS, ContentDelta, ThinkingDelta, ToolCall
-from RetAuGen.advisor import MAX_TOOL_ROUNDS, WORKFLOW_STEPS, Advisor, InMemoryApprovals
+from LLM import MODELS
+from RetAuGen.advisor import WORKFLOW_STEPS, InMemoryApprovals, advisor_context, build_advisor, last_reply, system_prompt
 from Utility.approval_context import ApprovalContext
+from Utility.chat_ui import STREAM_MODES, render_stream
 
 ROOT = Path(__file__).resolve().parent.parent
 QUESTION_FOLDER = ROOT / "Question"  # CSVs with a question column (and optionally an expected behavior column)
@@ -62,7 +65,7 @@ if not questions:
 if st.session_state.get("runner_file") != csv_file.name:
     st.session_state.runner_file = csv_file.name
     st.session_state.runner_rows = []
-    st.session_state.runner_prompt = Advisor().system_prompt()
+    st.session_state.runner_prompt = system_prompt()
 rows = st.session_state.runner_rows
 
 run_all = st.sidebar.button("Run all questions")
@@ -111,56 +114,19 @@ def write_results():
         writer.writerows(rows)
 
 
-def show_workflow(advisor):
-    """The advisor's workflow steps for the question in progress, as checkboxes (green when done)."""
+def show_progress(state):
+    """The advisor's workflow steps for the question in progress, as checkboxes (green when done), and its prompt."""
+    workflow = state.get("workflow", {})
     state_placeholder.markdown("\n\n".join(
-        f":green[**☑ {step}**]" if advisor.workflow[step] else f"☐ {step}" for step in WORKFLOW_STEPS
+        f":green[**☑ {step}**]" if workflow.get(step) else f"☐ {step}" for step in WORKFLOW_STEPS
     ))
-
-
-def ask(advisor, box, messages, use_tools=True, tool_rounds=0):
-    """The advisor's reply loop, the same as GABAI's: stream the model, run its tool calls, and ask again until it replies in text."""
-    with box:
-        with st.chat_message("assistant"):
-            thinking_placeholder = st.empty()
-            placeholder = st.empty()
-
-    prompt = advisor.system_prompt()  # carries the latest workflow state
-    messages[0]["content"] = prompt
+    prompt = system_prompt(workflow)  # carries the latest workflow state
     st.session_state.runner_prompt = prompt
     prompt_placeholder.code(prompt, language=None, wrap_lines=True)
 
-    reply, thinking, thinking_body = "", "", None
-    tool_calls: list[ToolCall] = []
-    provider = MODELS[model_name]()
-    for event in provider.stream(messages, advisor.available_tools() if use_tools else None):
-        if isinstance(event, ThinkingDelta):
-            if thinking_body is None:
-                thinking_body = thinking_placeholder.expander("Thinking", expanded=True).empty()
-            thinking += event.text
-            thinking_body.markdown(thinking + "▌")
-        elif isinstance(event, ContentDelta):
-            reply += event.text
-            placeholder.markdown(reply + "▌")
-        elif isinstance(event, ToolCall):
-            tool_calls.append(event)
 
-    if thinking:
-        thinking_placeholder.expander("Thinking", expanded=False).markdown(thinking)
-
-    if tool_calls:
-        messages.append({"role": "assistant", "content": reply, "thinking": thinking, "tool_calls": [asdict(tc) for tc in tool_calls]})
-        for tc in tool_calls:
-            messages.append({"role": "tool", "name": tc.name, "tool_call_id": tc.id, "content": advisor.process_tool(tc.arguments, tc.name)})
-        return ask(advisor, box, messages, use_tools=tool_rounds + 1 < MAX_TOOL_ROUNDS, tool_rounds=tool_rounds + 1)
-
-    placeholder.markdown(reply)
-    advisor.mark_done("Synthesize")
-    return reply
-
-
-def run_question(i, approval_store):
-    """Run question i through the whole GABAI workflow in a fresh conversation, record what the advisor did, then recurse to the next question."""
+def run_question(i, graph, approval_store):
+    """Run question i through the advisor graph in a fresh conversation, record what the advisor did, then recurse to the next question."""
     if i >= len(questions):
         progress_placeholder.progress(1.0, text=f"Done: {len(questions)} questions")
         state_placeholder.empty()
@@ -170,44 +136,45 @@ def run_question(i, approval_store):
     progress_placeholder.progress(i / len(questions), text=f"Running question {i + 1} of {len(questions)}")
 
     box = live_slot.container()
-    advisor = Advisor(approvals=ApprovalContext if save_approvals else (lambda: approval_store))
-    advisor.notify = box.caption  # the tools' progress lines (searching, classification, approvals)
-    advisor.on_change = lambda: show_workflow(advisor)
-    advisor.start_question()
     with box:
         with st.chat_message("user"):
             st.markdown(item["question"])
 
-    messages = [{"role": "system", "content": advisor.system_prompt()}, {"role": "user", "content": item["question"]}]
-    reply, error = None, None
+    config = {"configurable": {"thread_id": str(uuid.uuid4())}}  # a fresh conversation per question
+    error = None
     try:
-        reply = ask(advisor, box, messages)
+        context = advisor_context(MODELS[model_name](), approvals=ApprovalContext if save_approvals else (lambda: approval_store))
+        events = graph.stream({"messages": [HumanMessage(item["question"])]}, config, context=context, stream_mode=STREAM_MODES)
+        render_stream(events, box, nodes=("agent",), on_values=show_progress)
     except Exception as e:  # one failed question (a filtered prompt, a rate limit, a db error) must not stop the run
         error = f"{type(e).__name__}: {e}"
         box.error(f"{model_name}: {error}")
 
-    note = f"Tools called: {', '.join(advisor.tools_called) or 'none'}."
-    if advisor.approval_requests:
-        note += " Approval request created: " + " | ".join(advisor.approval_requests) + "."
+    state = graph.get_state(config).values  # what the advisor did, up to the error if there was one
+    classification = state.get("classification", "")
+    reply = last_reply(state) if not error else ""
+    note = f"Tools called: {', '.join(state.get('tools_called', [])) or 'none'}."
+    if state.get("approval_requests"):
+        note += " Approval request created: " + " | ".join(state["approval_requests"]) + "."
     if error:
         note += f" Error: {error}"
     rows.append({
         "Question": item["question"],
         "Expected Behavior": item["expected"],
-        "Agent Classify": advisor.classification or "(none)",
-        "Agent Response": (reply or "").strip() or "(no reply - the request failed)",
-        "Is Classify Expected": str(advisor.classification == item["expected"]).upper() if item["expected"] else "",
+        "Agent Classify": classification or "(none)",
+        "Agent Response": reply.strip() or "(no reply - the request failed)",
+        "Is Classify Expected": str(classification == item["expected"]).upper() if item["expected"] else "",
         "Is Response Expected": "",  # judged separately, e.g. on the LaaJ page
         "Note": note,
-        "Retrieved Chunks": ",".join(advisor.retrieved),
+        "Retrieved Chunks": ",".join(state.get("retrieved", [])),
     })
     write_results()
     show_results()
-    run_question(i + 1, approval_store)
+    run_question(i + 1, graph, approval_store)
 
 
 show_results()
 if run_all:
     rows.clear()
     show_results()
-    run_question(0, InMemoryApprovals())
+    run_question(0, build_advisor(checkpointer=InMemorySaver()), InMemoryApprovals())

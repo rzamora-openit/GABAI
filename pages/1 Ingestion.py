@@ -2,7 +2,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from LLM import AzureOpenAI, OllamaEmbedder
+from LLM import OllamaEmbedder, azure_openai
 from RetAuGen.ingestion_pipeline import ingest
 from Utility.agent_memory_context import AgentMemoryContext
 from Utility.vector_db_context import VectorDbContext
@@ -11,10 +11,10 @@ if st.button("Run ingestion pipeline"):
     with st.spinner("Ingesting..."):
         db = VectorDbContext()
         try:
-            ingest("KnowledgeBase", "KnowledgeBase/extracted", "KnowledgeBase/chunks", AzureOpenAI(options={"temperature": 0}), OllamaEmbedder(), db)
+            sources = ingest("KnowledgeBase", "KnowledgeBase/extracted", "KnowledgeBase/chunks", azure_openai(temperature=0), OllamaEmbedder(), db)
         finally:
             db.close()
-    st.success("Done.")
+    st.success(f"Done: {len(sources)} PDF(s) checked.")
 
 st.space()
 
