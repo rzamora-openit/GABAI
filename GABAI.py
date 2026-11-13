@@ -21,6 +21,9 @@ st.title("Assistant Conversation")
 # Pick the LLM; every provider streams the same Thinking / Content / ToolCall events
 model_name = st.sidebar.selectbox("Model", list(MODELS))
 
+# Switch for the memory agent: when off, no memory is created or changed (stored memory is still given to the main agent)
+create_memory = st.sidebar.toggle("Create memory", value=True)
+
 # Workflow state for the current question: the steps the agent must complete, in order.
 WORKFLOW_STEPS = ("Retrieve", "Classify", "Synthesize")
 
@@ -385,7 +388,7 @@ if prompt:
     with st.chat_message("user"): st.markdown(prompt)
     if generate():  # on error, skip the redraw so the error message stays visible
         final_response = st.session_state.messages[-1]["content"]
-        if final_response:
+        if final_response and create_memory:
             try:
                 if observe(prompt, final_response):
                     st.session_state.toast = ("Memory updated", "🧠")
